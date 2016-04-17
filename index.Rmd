@@ -1,0 +1,160 @@
+---
+title: "ML Course Project"
+author: "Moonlight"
+date: "Saturday, April 16, 2016"
+output: html_document
+---
+
+## Synopsis 
+The topic of this report is the correct use of personal activity devices. The description of the data collection can be found at this [website](http://groupware.les.inf.puc-rio.br/har). The data for this report consists of two data sets, a [training](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv) data set and a [testing](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv) data set. The data sets contain personal activity device activity for 6 individuals who were asked to perform barbell lifts correctly and incorrectly in 5 different ways. The outcome "classe" indicates whether the indidual performed the exercise correctly (classe="A") and incorrectly in 4 different ways (classe="B","C","D","E"). The goal is to create a model that uses the features from the data set to predict the classe outcome based on these features. 
+
+### Data Processing
+The following are the libraries that are needed for the analysis
+```{r, warning=FALSE}
+library(ggplot2)
+library(caret)
+library(randomForest)
+library(ISLR)
+library(mlbench)
+library(parallel)
+library(doParallel)
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+
+```
+
+**Read in the data:** Read in both the training and the testing data and make corrections as described. Remove the first few columns as they are not useful as predictors. Plot histograms of the outcome variable to look at the distribution.
+
+```{r,warning=FALSE}
+afile <- "pml-training.csv"
+training <- read.table(afile, header = TRUE, sep=',', na.strings = c("NA",""))
+trainingVals <- training[,!sapply(training,function(x) any(is.na(x)))]
+trainingVals <-trainingVals[,8:60]
+dimTrainingVals<-dim(trainingVals)
+
+oosTest <- read.table("pml-testing.csv", header = TRUE, sep=',', na.strings = c("NA",""))
+oosTestVals <- oosTest[,!sapply(oosTest,function(x) any(is.na(x)))]
+oosTestVals <-oosTestVals[,8:60]
+dimTest <-dim(oosTestVals)
+
+barplot(prop.table(table(trainingVals$classe)),xlab = "classe",ylab=  "percentage", 
+        main = "Histogram for training data" )
+
+
+```
+
+There are `r dimTrainingVals[2]` predictors. The bar plot shows that the 5 classes are nicely balanced. My first thought was to use multiple models. However, the first model, shown below, had 99% accuracy, so there was no need to do additional or stacked models.
+
+### Preprocessing Analysis
+I looked at the standard deviations for each column of the data, and also the correlations.  Once again, due to the accuracy of the model on my first pass with no preprocessing, there was no need to do any preprocessing. I left the information in the report below for completeness. Note: Column 53 is the class we are predicting, so leave that out.
+
+**Standard Deviation Analysis:**
+
+```{r, warning=FALSE}
+meanAndSd <- as.data.frame(t(sapply(trainingVals[,-53], function(cl) list(means=mean(cl), sds=sd(cl)))))
+maxMeans <- max(unlist(meanAndSd[,"means"]))
+maxSDs <- max(unlist(meanAndSd[,"sds"]))
+
+```
+Taking a look at the maximum standard deviation, `r maxSDs`, it appears that it might be a good idea to do some preprocessing. Next, deterimine if any of the predictors are highly correlated. If so, it wil be useful to produce predictors using PCA. 
+
+**Correlation Matrix:**
+
+```{r}
+M <- abs(cor(trainingVals[,-53]))
+diag(M) <- 0
+nrow(which(M>0.8,arr.ind=T))
+
+```
+
+It appears that there are quite a few correlated variables. Normally, one would consider some PCA approach to reduce the number of variables. Once again, my first run through without any preprocessing was successful, so I did not redo the model with preprocessing.  
+
+**Set up Parallel Processing** 
+I set up the parallel processing in an attempt to speed up the model fit, as the random forests can be quite slow. I can't say that it worked, but [this](https://github.com/lgreski/datasciencectacontent/blob/master/markdown/pml-randomForestPerformance.md) is where I got the information. The idea for setting up the training using x / y syntax also came from the above mentioned website. The link to the website came from the class mentor in one of the discussion threads. 
+
+**Set up the training and test sets, and cross-validation**:
+Break the training set up into a training set and testing set. That way, the accuracy can be checked on the training set before using the out of sample data for the quiz. Set up the trainControl to use 10-fold cross validation. Use 10-fold cross validation because it is a  good way to balance the tension between accuracy and bias in a large data set. 
+ 
+
+```{r, cache=TRUE}
+set.seed(35533)
+inTraining <- createDataPartition(trainingVals$classe, p = .75, list=FALSE)
+training <- trainingVals[inTraining,]
+testing <- trainingVals[-inTraining,]
+
+
+x <- training[,-53]
+y <- training[,53]
+fitControl <- trainControl(method = "cv",
+                           number = 10,
+                           allowParallel = TRUE)
+```
+
+### Model Analysis 
+
+**Run the model:**
+Put the next part into cache so it doesn't need to be recalculated each time, as the run time for the model fitting is about 30 minutes, even with the parallel processing setup.
+
+```{r, cache=TRUE}
+fit <- train(x,y, method="rf",data=trainingVals,trControl = fitControl)
+
+```
+
+**Discussion**
+
+```{r,warning=FALSE}
+stopCluster(cluster)
+fit$results
+
+```
+
+From the results table, the accuracy noted is `r max(fit$results$Accuracy)`.  Next,look at the confusion matrix on the training data and on the testing data that was sampled from the training data. 
+
+**Most important 5 variables:** 
+
+```{r,warning=FALSE}
+ fit$finalModel$importance[1:5,]
+```
+
+### Accuracy and Estimated Error
+**Training data confusion matrix**
+```{r,warning=FALSE}
+predTrain <- predict(fit,training)
+confusionMatrix(predTrain,training$classe)$table
+training$predRight <- training$classe==predTrain
+accuracyTrain <-sum(training$predRight)/length(training$predRight)
+```
+
+**Testing data (from training data) confusion matrix**
+
+```{r, warning=FALSE}
+
+predTest <- predict(fit,testing)
+confusionMatrix(predTest,testing$classe)$table
+testing$predRight <- testing$classe==predTest
+accuracyTest <-sum(testing$predRight)/length(testing$predRight)
+
+
+qplot(classe, colour =predRight, data=training, main="Training Set Predictions")
+
+```
+
+
+The accuracy on the testing set is `r accuracyTest`. The estimated error on the testing set is `r 1- accuracyTest^20 `. Since the accuracy on the test set was so high, predRight only has 1 value (TRUE). I would expect that I will get a most of the answers correct on the quiz. The final model shows an estimated out of sample error rate of .62%. Unfortunately, I was not able to get that to print out without printing out the whole model.
+
+
+### Results on Out of Sample Data
+
+The results of applying the model to the out of sample data is as follows:
+
+```{r,warning=FALSE}
+
+testOutFit <- predict(fit,oosTestVals)
+testOutFit
+
+```
+
+These answers corresponded 100% to the correct answers, as expected.
+
+### Conclusions
+I anticipated having to do a significant amount of preprocessing and model stacking to complete this assignment successfully. Fortunately, the random forest model did not overfit the data, probably due to the use of the cross-validation process. Although this saved coding time, it took over 30 minutes to process the model, even with parallelization on 4 logical machines. It would be interesting to do it again, using the preprocessing for scaling and PCA, but that will be left for future efforts.
